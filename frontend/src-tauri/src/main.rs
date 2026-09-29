@@ -4,13 +4,16 @@
 )]
 
 use log;
-use env_logger;
 
 fn main() {
     std::env::set_var("RUST_LOG", "info");
+
+    // On macOS, tauri-plugin-log owns the logger so Finder-launched startup
+    // failures are persisted under ~/Library/Logs/<bundle identifier>/.
+    // Keep env_logger for terminal-oriented development on other platforms.
+    #[cfg(not(target_os = "macos"))]
     env_logger::init();
 
-    // Async logger will be initialized lazily when first needed (after Tauri runtime starts)
     log::info!("Starting application...");
     app_lib::run();
 }
