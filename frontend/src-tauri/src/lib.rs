@@ -449,6 +449,15 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default();
 
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        );
+    }
+
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -579,11 +588,15 @@ pub fn run() {
             //     });
             // }
 
-            // Initialize database (handles first launch detection and conditional setup)
+            // Initialize database (handles first launch detection and conditional setup).
+            // Keep explicit startup markers in the persistent macOS log so a launch stall can
+            // be distinguished from a WebView/Tauri initialization failure.
+            log::info!("Startup phase: database initialization begin");
             tauri::async_runtime::block_on(async {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             })
             .expect("Failed to initialize database");
+            log::info!("Startup phase: database initialization complete");
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
