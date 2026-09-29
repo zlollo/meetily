@@ -1,0 +1,92 @@
+name: Fork macOS Baseline
+
+on:
+  push:
+    branches:
+      - chore/macos26-fork-baseline
+  workflow_dispatch:
+
+concurrency:
+  group: fork-macos-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  macos-arm64:
+    name: macOS Apple Silicon baseline
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: fork-macos-arm64
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        working-directory: frontend
+        run: pnpm exec tsc --noEmit
+
+      - name: Build llama-helper sidecar
+        run: |
+          cargo build --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+
+      - name: Build unsigned macOS app
+        working-directory: frontend
+        run: >
+          pnpm tauri build
+          --target aarch64-apple-darwin
+          --config src-tauri/tauri.fork-dev.conf.json
+
+      - name: Inspect app bundle
+        run: |
+          APP_PATH="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          echo "App bundle: $APP_PATH"
+          ls -lah "$APP_PATH/Contents/MacOS"
+          plutil -p "$APP_PATH/Contents/Info.plist"
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 || true
+
+      - name: Upload macOS baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetily-fork-macos-arm64-baseline
+          path: |
+            target/aarch64-apple-darwin/release/bundle/macos/*.app
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
