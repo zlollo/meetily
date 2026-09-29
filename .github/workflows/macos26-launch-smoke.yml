@@ -1,0 +1,124 @@
+name: macOS 26 Launch Smoke
+
+on:
+  push:
+    branches:
+      - fix/macos26-launch-plist
+  workflow_dispatch:
+
+concurrency:
+  group: macos26-launch-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  launch-smoke:
+    name: Build and launch on macOS 26.6
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: macos26-launch-smoke
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        working-directory: frontend
+        run: pnpm exec tsc --noEmit
+
+      - name: Build llama-helper sidecar
+        run: |
+          cargo build --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+
+      - name: Build macOS app
+        working-directory: frontend
+        run: >
+          pnpm tauri build
+          --target aarch64-apple-darwin
+          --config src-tauri/tauri.fork-dev.conf.json
+
+      - name: Verify bundle metadata
+        run: |
+          APP_PATH="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          sw_vers
+          uname -a
+          plutil -p "$APP_PATH/Contents/Info.plist"
+          CARBON="$(/usr/libexec/PlistBuddy -c 'Print :LSRequiresCarbon' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+          echo "LSRequiresCarbon=$CARBON"
+          test "$CARBON" = "false"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Smoke launch through LaunchServices
+        run: |
+          APP_PATH="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          echo "Launching $APP_PATH..."
+          open "$APP_PATH"
+          sleep 8
+
+          PID="$(pgrep -x meetily | head -n 1 || true)"
+          if [ -z "$PID" ]; then
+            echo "::error::Meetily did not remain running after LaunchServices launch."
+            find "$HOME/Library/Logs/com.meetily.ai" -maxdepth 2 -type f -print -exec tail -n 160 {} \; 2>/dev/null || true
+            exit 1
+          fi
+
+          RSS_KB="$(ps -o rss= -p "$PID" | tr -d ' ')"
+          echo "meetily pid=$PID rss_kb=$RSS_KB"
+          ps -p "$PID" -o pid,ppid,%cpu,rss,vsz,state,etime,command
+
+          if [ -z "$RSS_KB" ] || [ "$RSS_KB" -lt 10240 ]; then
+            echo "::error::Meetily process exists but did not initialize normally."
+            find "$HOME/Library/Logs/com.meetily.ai" -maxdepth 2 -type f -print -exec tail -n 160 {} \; 2>/dev/null || true
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "LaunchServices smoke test passed."
+          kill "$PID" 2>/dev/null || true
+          sleep 2
+
+      - name: Upload macOS 26 launch-fix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetily-macos26-launch-fix
+          path: |
+            target/aarch64-apple-darwin/release/bundle/macos/*.app
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
