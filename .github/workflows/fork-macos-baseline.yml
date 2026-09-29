@@ -21,7 +21,7 @@ env:
 jobs:
   macos-arm64:
     name: macOS Apple Silicon baseline
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
@@ -78,9 +78,42 @@ jobs:
           APP_PATH="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_PATH"
           echo "App bundle: $APP_PATH"
+          sw_vers
+          uname -a
           ls -lah "$APP_PATH/Contents/MacOS"
           plutil -p "$APP_PATH/Contents/Info.plist"
           codesign -dv --verbose=4 "$APP_PATH" 2>&1 || true
+
+      - name: Smoke launch through macOS LaunchServices
+        run: |
+          APP_PATH="$(find target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+
+          echo "Launching $APP_PATH through LaunchServices..."
+          open "$APP_PATH"
+          sleep 8
+
+          PID="$(pgrep -x meetily | head -n 1 || true)"
+          if [ -z "$PID" ]; then
+            echo "::error::Meetily did not remain running after LaunchServices launch."
+            find "$HOME/Library/Logs/com.meetily.ai" -maxdepth 2 -type f -print -exec tail -n 120 {} \; 2>/dev/null || true
+            exit 1
+          fi
+
+          RSS_KB="$(ps -o rss= -p "$PID" | tr -d ' ')"
+          echo "meetily pid=$PID rss_kb=$RSS_KB"
+
+          if [ -z "$RSS_KB" ] || [ "$RSS_KB" -lt 10240 ]; then
+            echo "::error::Meetily launched but did not initialize to a normal resident process."
+            ps -p "$PID" -o pid,ppid,%cpu,rss,vsz,state,etime,command || true
+            find "$HOME/Library/Logs/com.meetily.ai" -maxdepth 2 -type f -print -exec tail -n 120 {} \; 2>/dev/null || true
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "LaunchServices smoke test passed."
+          kill "$PID" 2>/dev/null || true
+          sleep 2
 
       - name: Upload macOS baseline artifact
         uses: actions/upload-artifact@v4
